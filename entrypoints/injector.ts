@@ -46,7 +46,7 @@ function installFetchInterceptor() {
                   if (JSON.stringify(data).includes('batchId')) {
                     window.postMessage({ type: 'FLOW_BATCH_RESPONSE', data }, '*');
                   }
-                } catch {}
+                } catch { /* noop — malformed NDJSON line */ }
               });
           }
         })
@@ -81,7 +81,7 @@ function installXHRInterceptor() {
             { type: 'FLOW_BATCH_RESPONSE', data: JSON.parse(this.responseText) },
             '*',
           );
-        } catch {}
+        } catch { /* noop — XHR response parse error */ }
       });
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -236,7 +236,7 @@ async function doInject(promptText: string): Promise<void> {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rProps = (sendBtn as Record<string, any>)[rKey] as { onClick?: (e: unknown) => void } | undefined;
       if (typeof rProps?.onClick === 'function') {
-        try { rProps.onClick({ preventDefault: () => {}, stopPropagation: () => {}, nativeEvent: { isTrusted: true } }); } catch {}
+        try { rProps.onClick({ preventDefault: () => {}, stopPropagation: () => {}, nativeEvent: { isTrusted: true } }); } catch { /* noop */ }
       }
     }
   }
@@ -248,7 +248,7 @@ async function doInject(promptText: string): Promise<void> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const eProps = (editor as Record<string, any>)[eKey] as { onKeyDown?: (e: unknown) => void } | undefined;
     if (typeof eProps?.onKeyDown === 'function') {
-      try { eProps.onKeyDown({ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, preventDefault: () => {}, stopPropagation: () => {}, nativeEvent: { isTrusted: true } }); } catch {}
+      try { eProps.onKeyDown({ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, preventDefault: () => {}, stopPropagation: () => {}, nativeEvent: { isTrusted: true } }); } catch { /* noop */ }
     }
   }
 }

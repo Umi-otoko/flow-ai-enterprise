@@ -1,4 +1,4 @@
-import { ScriptScene } from '../../utils/types';
+import type { ScriptScene } from '../../utils/types';
 import { parseImagePromptToText } from '../../utils/parser';
 
 export type ApiPrompt = { scene_number: number; prompt: string };
@@ -79,14 +79,17 @@ export class LocalApiClient {
 
   private normalize(data: unknown): ApiPrompt[] {
     if (Array.isArray(data)) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       if ((data[0] as any)?.image_prompt) {
         return (data as ScriptScene[]).map(s => ({
           scene_number: s.scene_number,
           prompt: parseImagePromptToText(s.image_prompt),
         }));
       }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       if ((data[0] as any)?.prompt) return data as ApiPrompt[];
     }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const obj = data as any;
     if (obj?.scenes) {
       return (obj.scenes as ScriptScene[]).map(s => ({

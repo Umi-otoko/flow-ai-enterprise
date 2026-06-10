@@ -1,4 +1,4 @@
-import { BotState, BotEvent } from '../../utils/types';
+import type { BotState, BotEvent } from '../../utils/types';
 
 // ─── Transition table ─────────────────────────────────────────────────────────
 

@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { browser } from 'wxt/browser';
-import { ExtensionState } from '../../utils/types';
+import type { ExtensionState } from '../../utils/types';
 import { DEFAULT_STATE } from '../../lib/store/QueueStore';
 import { ProgressBar } from './components/ProgressBar';
 import { MiniGallery } from './components/MiniGallery';
 import { ErrorLog } from './components/ErrorLog';
 import { QueueList } from './components/QueueList';
-import { SourcePanel, ParsedPrompt } from './components/SourcePanel';
+import { SourcePanel, type ParsedPrompt } from './components/SourcePanel';
 import { StateMachineIndicator } from './components/StateMachineIndicator';
 
 export default function App() {

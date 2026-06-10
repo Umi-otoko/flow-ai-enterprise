@@ -1,4 +1,4 @@
-import { ScriptScene } from '../utils/types';
+import type { ScriptScene } from '../utils/types';
 import { parseImagePromptToText } from '../utils/parser';
 
 export interface RawPrompt {

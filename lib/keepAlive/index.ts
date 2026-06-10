@@ -85,7 +85,7 @@ export function maintainPort(
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = setInterval(() => {
       try { port.postMessage({ type: 'HEARTBEAT', ts: Date.now() }); }
-      catch { clearInterval(heartbeat!); connect(); }
+      catch { if (heartbeat) clearInterval(heartbeat); connect(); }
     }, 20_000);
 
     port.onMessage.addListener(onMessage);

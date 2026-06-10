@@ -1,4 +1,4 @@
-import { LogEntry } from '../../../utils/types';
+import type { LogEntry } from '../../../utils/types';
 
 interface Props {
   logs: LogEntry[];

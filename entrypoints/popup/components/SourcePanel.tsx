@@ -1,7 +1,9 @@
 import { useRef, useState } from 'react';
-import { ScriptData } from '../../../utils/types';
+import type { ChangeEvent } from 'react';
+import type { ScriptData } from '../../../utils/types';
 import { parseImagePromptToText } from '../../../utils/parser';
-import { PromptManager, RawPrompt } from '../../../lib/PromptManager';
+import { PromptManager } from '../../../lib/PromptManager';
+import type { RawPrompt } from '../../../lib/PromptManager';
 
 export type ParsedPrompt = RawPrompt;
 
@@ -21,7 +23,7 @@ interface Props {
 }
 
 export function SourcePanel({
-  apiSource,
+  apiSource: _apiSource,
   localApiUrl,
   isRunning,
   isPaused,
@@ -52,7 +54,7 @@ export function SourcePanel({
     else if (t === 'local_api') onSourceChange('local_api');
   }
 
-  function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+  function handleFile(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     setFileName(file.name);
@@ -76,7 +78,7 @@ export function SourcePanel({
     reader.readAsText(file);
   }
 
-  function handlePasteChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+  function handlePasteChange(e: ChangeEvent<HTMLTextAreaElement>) {
     const text = e.target.value;
     setPasteText(text);
     setError('');

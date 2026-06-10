@@ -13,7 +13,7 @@
  */
 
 import { browser } from 'wxt/browser';
-import { ExtensionState, QueueItem, GeneratedImage, BotEvent } from '../utils/types';
+import type { ExtensionState, QueueItem, GeneratedImage, BotEvent } from '../utils/types';
 import { QueueStore, DEFAULT_STATE, idbPushGallery, idbPushLog } from '../lib/store/QueueStore';
 import { BackoffManager } from '../lib/automation/BackoffManager';
 import { SemanticNamer } from '../lib/naming/SemanticNamer';
@@ -22,7 +22,6 @@ import {
   registerAlarm,
   handleAlarm,
   PortRegistry,
-  ALARM_NAME,
   PORT_NAME,
 } from '../lib/keepAlive/index';
 
@@ -181,7 +180,7 @@ function handleMessage(msg: Record<string, unknown>, reply: (r: unknown) => void
 
 // ─── FSM ─────────────────────────────────────────────────────────────────────
 
-function applyEvent(event: BotEvent, payload?: unknown): void {
+function applyEvent(event: BotEvent, _payload?: unknown): void {
   const next = transition(state.botState, event);
   if (next === state.botState) return;
   console.log(`[FLOW FSM] ${state.botState} --${event}--> ${next}`);
@@ -228,7 +227,6 @@ function tryProcessNext(): void {
 }
 
 // ─── Batch / media mapping ────────────────────────────────────────────────────
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- tRPC response shape is unknown at compile time
 
 function handleBatch(raw: unknown): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -243,7 +241,6 @@ function handleBatch(raw: unknown): void {
     const batchId: string | undefined = wf?.metadata?.batchId;
     if (!batchId) continue;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const batchMedia = mediaItems.filter(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (m: any) => m?.image?.generatedImage?.workflowId === wfId || m?.workflowId === wfId,
@@ -380,7 +377,6 @@ function handleRateLimit(): void {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function unwrapTrpc(raw: unknown): unknown {
   if (Array.isArray(raw)) {
     for (const item of raw) {

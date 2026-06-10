@@ -1,4 +1,4 @@
-import { BotState } from '../../../utils/types';
+import type { BotState } from '../../../utils/types';
 import { STATE_LABELS, STATE_COLOR } from '../../../lib/stateMachine/index';
 
 interface Props {

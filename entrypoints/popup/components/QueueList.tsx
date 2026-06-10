@@ -1,4 +1,4 @@
-import { QueueItem } from '../../../utils/types';
+import type { QueueItem } from '../../../utils/types';
 
 interface Props {
   queue: QueueItem[];

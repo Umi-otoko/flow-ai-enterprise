@@ -16,7 +16,7 @@
  *   a cross-origin messaging layer for every state read.
  */
 
-import { ExtensionState, QueueItem, GeneratedImage, LogEntry } from '../../utils/types';
+import type { ExtensionState, GeneratedImage, LogEntry } from '../../utils/types';
 
 const STATE_KEY   = 'flow_ext_state_v3';
 const MAX_GALLERY = 60;

@@ -1,4 +1,4 @@
-import { GeneratedImage } from '../../../utils/types';
+import type { GeneratedImage } from '../../../utils/types';
 
 interface Props {
   images: GeneratedImage[];
