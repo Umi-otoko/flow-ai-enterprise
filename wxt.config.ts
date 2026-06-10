@@ -8,7 +8,7 @@ export default defineConfig({
     name: 'Flow AI Enterprise Generator',
     description: 'Automated mass generation of AI images for moodboards and ad campaigns',
     version: '2.0.0',
-    permissions: ['scripting', 'activeTab', 'downloads', 'storage'],
+    permissions: ['scripting', 'activeTab', 'downloads', 'storage', 'alarms'],
   },
   vite: () => ({
     css: {

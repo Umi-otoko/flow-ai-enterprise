@@ -7,6 +7,7 @@ import { MiniGallery } from './components/MiniGallery';
 import { ErrorLog } from './components/ErrorLog';
 import { QueueList } from './components/QueueList';
 import { SourcePanel, ParsedPrompt } from './components/SourcePanel';
+import { StateMachineIndicator } from './components/StateMachineIndicator';
 
 export default function App() {
   const [state, setState] = useState<ExtensionState>(DEFAULT_STATE);
@@ -107,6 +108,15 @@ export default function App() {
             <span className="text-[10px] text-red-400 font-medium">{errors} error{errors > 1 ? 's' : ''}</span>
           )}
         </div>
+      </div>
+
+      {/* FSM state machine indicator — always visible */}
+      <div className="bg-slate-800 rounded-xl p-3 border border-slate-700">
+        <StateMachineIndicator
+          state={state.botState ?? 'IDLE'}
+          nextRetryAt={state.nextRetryAt}
+          backoffAttempt={state.backoffAttempt}
+        />
       </div>
 
       {/* Progress bar (only when queue active) */}

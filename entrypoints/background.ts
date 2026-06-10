@@ -1,32 +1,51 @@
+/**
+ * Background Service Worker — "The Brain"
+ *
+ * Responsibilities (and ONLY these):
+ *   1. Persist and serve ExtensionState (chrome.storage.local)
+ *   2. Orchestrate the queue: decide which scene to process next, send
+ *      INJECT_PROMPT commands to the content script via the keepalive port
+ *   3. Execute chrome.downloads (content scripts can't trigger downloads)
+ *   4. Manage exponential backoff for rate limits
+ *   5. Stay alive via chrome.alarms + long-lived port connections
+ *
+ * It does NOT touch the DOM. All DOM operations happen in content.ts.
+ */
+
 import { browser } from 'wxt/browser';
-import { ExtensionState, QueueItem, GeneratedImage } from '../utils/types';
-import { QueueStore, DEFAULT_STATE } from '../lib/store/QueueStore';
+import { ExtensionState, QueueItem, GeneratedImage, BotEvent } from '../utils/types';
+import { QueueStore, DEFAULT_STATE, idbPushGallery, idbPushLog } from '../lib/store/QueueStore';
 import { BackoffManager } from '../lib/automation/BackoffManager';
 import { SemanticNamer } from '../lib/naming/SemanticNamer';
+import { transition } from '../lib/stateMachine/index';
+import {
+  registerAlarm,
+  handleAlarm,
+  PortRegistry,
+  ALARM_NAME,
+  PORT_NAME,
+} from '../lib/keepAlive/index';
 
-const MAX_CONCURRENT = 3;
 const IMAGES_PER_SCENE = 2;
-const POST_INJECT_DELAY_MS = 2_000;
 
-// Runtime state — also persisted to chrome.storage after every mutation
+// ─── Runtime singletons ───────────────────────────────────────────────────────
+
 let state: ExtensionState = { ...DEFAULT_STATE };
-const backoff = new BackoffManager();
-
-// Download dedup guards
+const backoff   = new BackoffManager();
+const ports     = new PortRegistry();
 const downloadedIds = new Set<string>();
-// mediaId (UUID from URL) → { sceneNumber, imageIndex }
-const mediaMap = new Map<string, { sceneNumber: number; imageIndex: number }>();
-
-let isInjecting = false;
-let rateLimitTimer: ReturnType<typeof setTimeout> | null = null;
-let isInitialized = false;
+const mediaMap  = new Map<string, { sceneNumber: number; imageIndex: number }>();
+let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 export default defineBackground(async () => {
-  console.log('[FLOW] Background orchestrator v2 started');
+  console.log('[FLOW BG] Service Worker started');
 
-  // Register the MAIN-world injector (WXT doesn't auto-register non-matches-based scripts)
+  // 1 — Register keep-alive alarm (fires every ~20s)
+  registerAlarm();
+
+  // 2 — Register the MAIN-world injector script
   chrome.scripting.registerContentScripts([{
     id: 'flow-injector',
     matches: ['*://*.google.com/*', '*://labs.google/*'],
@@ -40,19 +59,39 @@ export default defineBackground(async () => {
       js: ['injector.js'],
       world: 'MAIN',
       runAt: 'document_start',
-    }]).catch((e) => console.error('[INJECTOR] update failed:', e));
+    }]).catch((e) => console.error('[FLOW BG] Injector update failed:', e));
   });
 
-  // Restore persisted state (fault tolerance on reload/crash)
-  const saved = await QueueStore.load();
-  state = { ...saved, isRunning: false, isPaused: false }; // never auto-resume
-
-  // Re-hydrate download guard from gallery
+  // 3 — Restore persisted state (crash / SW-kill recovery)
+  state = await QueueStore.load();
+  state.isRunning = false; // never auto-resume on SW restart — require explicit user action
+  state.botState  = 'IDLE';
   for (const img of state.gallery) downloadedIds.add(img.id);
 
-  browser.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    handleMessage(msg, sendResponse);
-    return true; // keep async channel open
+  // 4 — Alarm handler: keeps SW alive + re-triggers queue on resurrection
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    handleAlarm(alarm, () => {
+      if (state.isRunning && !state.isPaused) tryProcessNext();
+    });
+  });
+
+  // 5 — Long-lived port connections (second keep-alive strategy)
+  chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== PORT_NAME) return;
+    ports.register(port);
+
+    port.onMessage.addListener((msg: any) => {
+      switch (msg.type) {
+        case 'HEARTBEAT': break; // keeping SW alive via active port
+        case 'FSM_EVENT': applyEvent(msg.event as BotEvent, msg.payload); break;
+      }
+    });
+  });
+
+  // 6 — Standard one-shot messages (from popup and content script)
+  browser.runtime.onMessage.addListener((msg: any, _sender, reply) => {
+    handleMessage(msg, reply);
+    return true;
   });
 });
 
@@ -60,84 +99,78 @@ export default defineBackground(async () => {
 
 function handleMessage(msg: any, reply: (r: any) => void) {
   switch (msg.type as string) {
+
     case 'GET_STATE':
       reply({ state });
       break;
 
     case 'START_QUEUE': {
-      const { prompts, tabId, projectName } = msg.payload as {
-        prompts: { scene_number: number; prompt: string }[];
-        tabId: number;
-        projectName?: string;
-      };
-
+      const { prompts, tabId, projectName } = msg.payload;
       state.activeTabId = tabId;
-      state.isRunning = true;
-      state.isPaused = false;
+      state.isRunning   = true;
+      state.isPaused    = false;
       if (projectName) state.projectName = projectName;
 
-      const newItems: QueueItem[] = prompts.map((p) => ({
-        id: crypto.randomUUID(),
+      const newItems: QueueItem[] = prompts.map((p: { scene_number: number; prompt: string }) => ({
+        id:           crypto.randomUUID(),
         scene_number: p.scene_number,
-        prompt: p.prompt,
-        status: 'PENDING',
-        retryCount: 0,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
+        prompt:       p.prompt,
+        status:       'PENDING',
+        retryCount:   0,
+        createdAt:    Date.now(),
+        updatedAt:    Date.now(),
       }));
 
       state.queue = [...state.queue, ...newItems];
       log('info', `Queue loaded: ${newItems.length} scene(s) added`);
       persistAndBroadcast();
-      initAndProcess(tabId);
+      tryProcessNext();
       reply({ success: true });
       break;
     }
 
     case 'PAUSE_QUEUE':
       state.isRunning = false;
-      state.isPaused = true;
-      log('info', 'Queue paused by user');
-      persistAndBroadcast();
+      state.isPaused  = true;
+      applyEvent('PAUSE');
       reply({ success: true });
       break;
 
     case 'RESUME_QUEUE':
       state.isRunning = true;
-      state.isPaused = false;
-      log('info', 'Queue resumed by user');
-      persistAndBroadcast();
-      processQueue();
+      state.isPaused  = false;
+      applyEvent('RESUME');
+      tryProcessNext();
       reply({ success: true });
       break;
 
     case 'CLEAR_QUEUE':
       state = {
         ...DEFAULT_STATE,
-        apiSource: state.apiSource,
+        apiSource:  state.apiSource,
         localApiUrl: state.localApiUrl,
         projectName: state.projectName,
       };
       mediaMap.clear();
       downloadedIds.clear();
       backoff.reset();
-      if (rateLimitTimer) { clearTimeout(rateLimitTimer); rateLimitTimer = null; }
-      isInitialized = false;
-      isInjecting = false;
+      if (cooldownTimer) { clearTimeout(cooldownTimer); cooldownTimer = null; }
       QueueStore.clear().catch(() => {});
       broadcastState();
       reply({ success: true });
       break;
 
+    // From content script bridge (originally from injector MAIN world)
     case 'BATCH_DETECTED':
-      handleBatchDetected(msg.payload);
+      handleBatch(msg.payload);
       break;
 
     case 'IMAGE_TILE_APPEARED':
-      handleTileAppeared(msg.payload as { tileId: string; src: string });
+      handleTile(msg.payload as { tileId: string; src: string });
       break;
 
     case 'RATE_LIMIT_DETECTED':
+      applyEvent('RATE_LIMIT');
       handleRateLimit();
       break;
 
@@ -146,78 +179,111 @@ function handleMessage(msg: any, reply: (r: any) => void) {
   }
 }
 
-// ─── tRPC batch response handler ─────────────────────────────────────────────
+// ─── FSM ─────────────────────────────────────────────────────────────────────
 
-function handleBatchDetected(raw: unknown) {
-  try {
-    const data = unwrapTrpc(raw) as any;
-    const workflows: any[] = data?.workflows ?? [];
-    const mediaItems: any[] = data?.media ?? [];
+function applyEvent(event: BotEvent, payload?: unknown): void {
+  const next = transition(state.botState, event);
+  if (next === state.botState) return;
+  console.log(`[FLOW FSM] ${state.botState} --${event}--> ${next}`);
+  state.botState = next;
+  persistAndBroadcast();
+}
 
-    for (const workflow of workflows) {
-      const workflowId: string = workflow?.name ?? '';
-      const batchId: string | undefined = workflow?.metadata?.batchId;
-      if (!batchId) continue;
+// ─── Queue orchestration ─────────────────────────────────────────────────────
 
-      const batchMedia = mediaItems.filter(
-        (m) =>
-          m?.image?.generatedImage?.workflowId === workflowId ||
-          m?.workflowId === workflowId,
-      );
+function tryProcessNext(): void {
+  if (!state.isRunning || state.isPaused) return;
+  if (state.botState !== 'IDLE') return; // Already busy
+  if (!state.activeTabId) return;
 
-      const promptFromResponse: string | undefined =
-        batchMedia[0]?.image?.generatedImage?.requestData?.promptInputs?.[0]?.textInput ??
-        workflow?.metadata?.displayName;
+  const next = state.queue.find((q) => q.status === 'PENDING');
+  if (!next) return;
 
-      const target = promptFromResponse
-        ? state.queue.find(
-            (q) => q.status === 'IN_PROGRESS' && q.prompt === promptFromResponse,
-          )
-        : undefined;
+  next.status   = 'IN_PROGRESS';
+  next.updatedAt = Date.now();
+  state.activeSceneId = next.id;
+  applyEvent('START');
 
-      if (!target) continue;
+  // Command the content script to inject the prompt via the keepalive port
+  const sent = ports.postTo(state.activeTabId, {
+    type:   'INJECT_PROMPT',
+    prompt: next.prompt,
+    sceneId: next.id,
+  });
 
-      const alreadyMapped = [...mediaMap.values()].filter(
-        (v) => v.sceneNumber === target.scene_number,
-      ).length;
-
-      batchMedia.forEach((m: any, idx: number) => {
-        const mediaId: string | undefined =
-          m?.image?.generatedImage?.mediaId ?? m?.name;
-        if (mediaId && !mediaMap.has(mediaId)) {
-          mediaMap.set(mediaId, {
-            sceneNumber: target.scene_number,
-            imageIndex: alreadyMapped + idx + 1,
-          });
-        }
-      });
-    }
-  } catch (e) {
-    console.error('[BATCH] parse error', e);
+  if (!sent) {
+    // Port not ready yet — try via tabs.sendMessage as fallback
+    chrome.tabs.sendMessage(state.activeTabId, {
+      type:   'INJECT_PROMPT',
+      prompt: next.prompt,
+      sceneId: next.id,
+    }).catch((e) => {
+      log('error', `Could not reach content script: ${e}`);
+      next.status = 'ERROR';
+      next.errorMessage = 'Content script unreachable';
+      state.activeSceneId = null;
+      applyEvent('FATAL_ERROR');
+    });
   }
 }
 
-// ─── Reactive tile handler (replaces setInterval polling) ────────────────────
+// ─── Batch / media mapping ────────────────────────────────────────────────────
 
-function handleTileAppeared({ tileId, src }: { tileId: string; src: string }) {
+function handleBatch(raw: unknown): void {
+  const data = unwrapTrpc(raw) as any;
+  const workflows: any[] = data?.workflows ?? [];
+  const mediaItems: any[] = data?.media ?? [];
+
+  for (const wf of workflows) {
+    const wfId   = wf?.name ?? '';
+    const batchId: string | undefined = wf?.metadata?.batchId;
+    if (!batchId) continue;
+
+    const batchMedia = mediaItems.filter(
+      (m) => m?.image?.generatedImage?.workflowId === wfId || m?.workflowId === wfId,
+    );
+
+    const promptFromResponse: string | undefined =
+      batchMedia[0]?.image?.generatedImage?.requestData?.promptInputs?.[0]?.textInput ??
+      wf?.metadata?.displayName;
+
+    const target = promptFromResponse
+      ? state.queue.find((q) => q.status === 'IN_PROGRESS' && q.prompt === promptFromResponse)
+      : undefined;
+
+    if (!target) continue;
+
+    const alreadyMapped = [...mediaMap.values()].filter(
+      (v) => v.sceneNumber === target.scene_number,
+    ).length;
+
+    batchMedia.forEach((m: any, idx: number) => {
+      const mediaId: string | undefined = m?.image?.generatedImage?.mediaId ?? m?.name;
+      if (mediaId && !mediaMap.has(mediaId)) {
+        mediaMap.set(mediaId, { sceneNumber: target.scene_number, imageIndex: alreadyMapped + idx + 1 });
+      }
+    });
+  }
+}
+
+// ─── Tile → download ─────────────────────────────────────────────────────────
+
+function handleTile({ tileId, src }: { tileId: string; src: string }): void {
   if (downloadedIds.has(tileId)) return;
 
-  const uuidFromUrl =
-    src.match(/[?&]name=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1];
+  const uuid = src.match(/[?&]name=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1];
+  if (uuid && downloadedIds.has(uuid)) return;
 
-  if (uuidFromUrl && downloadedIds.has(uuidFromUrl)) return;
-
-  const mapping = uuidFromUrl ? mediaMap.get(uuidFromUrl) : undefined;
-  if (!mapping) return; // batch response not yet processed — will re-fire if tile reappears
+  const mapping = uuid ? mediaMap.get(uuid) : undefined;
+  if (!mapping) return;
 
   const sceneItem = state.queue.find(
     (q) => q.scene_number === mapping.sceneNumber && q.status === 'IN_PROGRESS',
   );
   if (!sceneItem) return;
 
-  // Mark as downloading immediately to prevent duplicate triggers
   downloadedIds.add(tileId);
-  if (uuidFromUrl) downloadedIds.add(uuidFromUrl);
+  if (uuid) downloadedIds.add(uuid);
 
   const filename = SemanticNamer.buildFilename(
     state.projectName,
@@ -226,70 +292,68 @@ function handleTileAppeared({ tileId, src }: { tileId: string; src: string }) {
     mapping.imageIndex,
   );
 
-  browser.downloads
-    .download({ url: src, filename, saveAs: false })
+  applyEvent('ALL_IMAGES_READY');
+
+  browser.downloads.download({ url: src, filename, saveAs: false })
     .then(() => {
       const img: GeneratedImage = {
-        id: uuidFromUrl ?? tileId,
-        sceneNumber: mapping.sceneNumber,
-        imageIndex: mapping.imageIndex,
-        url: src,
+        id: uuid ?? tileId,
+        sceneNumber:  mapping.sceneNumber,
+        imageIndex:   mapping.imageIndex,
+        url:          src,
         filename,
         downloadedAt: Date.now(),
       };
       state.gallery = [...state.gallery.slice(-59), img];
-      QueueStore.pushGalleryImage(img).catch(() => {});
-      log('info', `Downloaded: ${filename}`);
-      checkSceneComplete(mapping.sceneNumber, sceneItem);
+      idbPushGallery(img).catch(() => {});
+      log('info', `↓ ${filename}`);
+      checkSceneDone(mapping.sceneNumber, sceneItem);
     })
     .catch((err) => {
       log('error', `Download failed for scene ${mapping.sceneNumber}: ${err}`);
       downloadedIds.delete(tileId);
-      if (uuidFromUrl) downloadedIds.delete(uuidFromUrl);
+      if (uuid) downloadedIds.delete(uuid);
     });
 }
 
-function checkSceneComplete(sceneNumber: number, sceneItem: QueueItem) {
+function checkSceneDone(sceneNumber: number, sceneItem: QueueItem): void {
   const sceneMediaIds = [...mediaMap.entries()]
     .filter(([, v]) => v.sceneNumber === sceneNumber)
     .map(([k]) => k);
 
-  const allDone =
-    sceneMediaIds.length >= IMAGES_PER_SCENE &&
-    sceneMediaIds.every((mid) => downloadedIds.has(mid));
-
-  if (allDone) {
-    sceneItem.status = 'DOWNLOADED';
+  if (sceneMediaIds.length >= IMAGES_PER_SCENE && sceneMediaIds.every((id) => downloadedIds.has(id))) {
+    sceneItem.status   = 'DOWNLOADED';
     sceneItem.updatedAt = Date.now();
+    state.activeSceneId = null;
     backoff.reset();
+    applyEvent('DOWNLOAD_COMPLETE');
     persistAndBroadcast();
-    processQueue(); // immediately pull next pending item
+    tryProcessNext();
   }
 }
 
-// ─── Exponential backoff rate-limit handler ───────────────────────────────────
+// ─── Rate limit + backoff ─────────────────────────────────────────────────────
 
-function handleRateLimit() {
+function handleRateLimit(): void {
   const delay = backoff.nextDelay();
-  const attempt = backoff.getAttempt();
-  const readableDelay = delay >= 60_000 ? `${Math.round(delay / 60_000)}m` : `${Math.round(delay / 1000)}s`;
+  const label = delay >= 60_000 ? `${Math.round(delay / 60_000)}m` : `${Math.round(delay / 1000)}s`;
 
-  log('warn', `Rate limited (attempt ${attempt}) — cooling down ${readableDelay}`);
+  log('warn', `Rate limited (attempt ${backoff.getAttempt()}) — cooldown ${label}`);
 
   state.queue.forEach((q) => {
     if (q.status === 'IN_PROGRESS') {
-      q.status = 'RATE_LIMITED';
-      q.retryCount += 1;
-      q.updatedAt = Date.now();
-      q.errorMessage = `Rate limited — retry #${q.retryCount} in ${readableDelay}`;
+      q.status       = 'RATE_LIMITED';
+      q.retryCount   += 1;
+      q.updatedAt    = Date.now();
+      q.errorMessage = `Rate limited — retry #${q.retryCount} in ${label}`;
     }
   });
 
-  state.nextRetryAt = Date.now() + delay;
-  state.backoffAttempt = attempt;
+  state.nextRetryAt    = Date.now() + delay;
+  state.backoffAttempt = backoff.getAttempt();
 
-  if (rateLimitTimer) clearTimeout(rateLimitTimer);
-  rateLimitTimer = setTimeout(() => {
+  if (cooldownTimer) clearTimeout(cooldownTimer);
+  cooldownTimer = setTimeout(() => {
     state.queue.forEach((q) => {
       if (q.status === 'RATE_LIMITED') {
         q.status = 'PENDING';
@@ -298,141 +362,16 @@ function handleRateLimit() {
       }
     });
     state.nextRetryAt = 0;
-    log('info', 'Cooldown complete — resuming queue');
+    applyEvent('COOLDOWN_DONE');
+    log('info', 'Cooldown complete — resuming');
     persistAndBroadcast();
-    processQueue();
+    tryProcessNext();
   }, delay);
 
   persistAndBroadcast();
 }
 
-// ─── Queue processing ─────────────────────────────────────────────────────────
-
-async function initAndProcess(tabId: number) {
-  if (!isInitialized) {
-    isInitialized = true;
-    try {
-      const [{ result: existingIds }] = await chrome.scripting.executeScript({
-        target: { tabId },
-        func: () =>
-          Array.from(document.querySelectorAll('[data-tile-id]'))
-            .filter((t) => {
-              const img = t.querySelector('img') as HTMLImageElement;
-              return img?.src && !img.src.startsWith('data:');
-            })
-            .map((el) => el.getAttribute('data-tile-id')),
-      });
-      (existingIds ?? []).forEach((id: string | null) => {
-        if (id) downloadedIds.add(id);
-      });
-    } catch (e) {
-      log('error', `Init scan failed: ${e}`);
-    }
-  }
-  processQueue();
-}
-
-async function processQueue() {
-  if (!state.isRunning || state.isPaused || isInjecting || !state.activeTabId) return;
-
-  const inProgress = state.queue.filter((q) => q.status === 'IN_PROGRESS').length;
-  if (inProgress >= MAX_CONCURRENT) return;
-
-  const next = state.queue.find((q) => q.status === 'PENDING');
-  if (!next) return;
-
-  isInjecting = true;
-  next.status = 'IN_PROGRESS';
-  next.updatedAt = Date.now();
-  persistAndBroadcast();
-
-  try {
-    await injectPrompt(state.activeTabId, next.prompt);
-    await sleep(POST_INJECT_DELAY_MS);
-  } catch (e) {
-    log('error', `Injection failed for scene ${next.scene_number}: ${e}`);
-    next.status = 'ERROR';
-    next.errorMessage = String(e);
-    next.updatedAt = Date.now();
-    persistAndBroadcast();
-  } finally {
-    isInjecting = false;
-  }
-}
-
-// ─── DOM injection (runs in MAIN world of target tab) ─────────────────────────
-
-async function injectPrompt(tabId: number, promptText: string): Promise<void> {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'MAIN',
-    func: (text: string) => {
-      const editor = document.querySelector<HTMLElement>('[data-slate-editor="true"]');
-      if (!editor) throw new Error('[FLOW] Slate editor not found');
-
-      editor.focus();
-
-      const leaf = editor.querySelector('[data-slate-leaf="true"]') ?? editor;
-      const sel = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(leaf);
-      range.collapse(false);
-      sel?.removeAllRanges();
-      sel?.addRange(range);
-
-      const beforeInput = new InputEvent('beforeinput', {
-        inputType: 'insertText',
-        data: text,
-        bubbles: true,
-        cancelable: true,
-      }) as any;
-      beforeInput.getTargetRanges = () => [range];
-      editor.dispatchEvent(beforeInput);
-
-      if (!beforeInput.defaultPrevented) {
-        document.execCommand('insertText', false, text);
-        editor.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-
-      setTimeout(() => {
-        const sendBtn = Array.from(document.querySelectorAll('button')).find((b) => {
-          const icon = b.querySelector('i.google-symbols');
-          return icon?.textContent?.trim() === 'arrow_forward';
-        });
-
-        if (sendBtn) {
-          sendBtn.removeAttribute('disabled');
-          sendBtn.removeAttribute('aria-disabled');
-          (sendBtn as HTMLElement).style.pointerEvents = 'auto';
-          sendBtn.click();
-
-          const rKey = Object.keys(sendBtn).find((k) => k.startsWith('__reactProps$'));
-          if (rKey) {
-            const rProps = (sendBtn as any)[rKey];
-            if (typeof rProps?.onClick === 'function') {
-              try { rProps.onClick({ preventDefault: () => {}, stopPropagation: () => {}, nativeEvent: { isTrusted: true } }); } catch {}
-            }
-          }
-        }
-
-        editor.dispatchEvent(
-          new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }),
-        );
-
-        const eKey = Object.keys(editor).find((k) => k.startsWith('__reactProps$'));
-        if (eKey) {
-          const eProps = (editor as any)[eKey];
-          if (typeof eProps?.onKeyDown === 'function') {
-            try { eProps.onKeyDown({ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, preventDefault: () => {}, stopPropagation: () => {}, nativeEvent: { isTrusted: true } }); } catch {}
-          }
-        }
-      }, 800);
-    },
-    args: [promptText],
-  });
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function unwrapTrpc(raw: unknown): unknown {
   if (Array.isArray(raw)) {
@@ -447,31 +386,29 @@ function unwrapTrpc(raw: unknown): unknown {
   return raw;
 }
 
-function log(level: 'info' | 'warn' | 'error', message: string) {
+function log(level: 'info' | 'warn' | 'error', message: string): void {
   const entry = { id: crypto.randomUUID(), level, message, timestamp: Date.now() };
-  state.logs = [...state.logs.slice(-99), entry];
-  QueueStore.pushLog({ level, message }).catch(() => {});
-  console[level](`[FLOW] ${message}`);
+  state.logs = [...state.logs.slice(-119), entry];
+  idbPushLog({ level, message }).catch(() => {});
+  console[level](`[FLOW BG] ${message}`);
 }
 
-function persistAndBroadcast() {
+function persistAndBroadcast(): void {
   QueueStore.save({
-    queue: state.queue,
-    gallery: state.gallery,
-    logs: state.logs,
-    isRunning: state.isRunning,
-    isPaused: state.isPaused,
-    projectName: state.projectName,
+    botState:      state.botState,
+    queue:         state.queue,
+    gallery:       state.gallery,
+    logs:          state.logs,
+    isRunning:     state.isRunning,
+    isPaused:      state.isPaused,
+    activeSceneId: state.activeSceneId,
+    projectName:   state.projectName,
     backoffAttempt: state.backoffAttempt,
-    nextRetryAt: state.nextRetryAt,
+    nextRetryAt:   state.nextRetryAt,
   }).catch(() => {});
   broadcastState();
 }
 
-function broadcastState() {
+function broadcastState(): void {
   browser.runtime.sendMessage({ type: 'STATE_UPDATED', payload: state }).catch(() => {});
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }

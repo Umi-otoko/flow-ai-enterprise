@@ -1,10 +1,38 @@
+// ─── Finite State Machine ─────────────────────────────────────────────────────
+
+/** States of the automation bot lifecycle */
+export type BotState =
+  | 'IDLE'            // Queue empty or not started
+  | 'AWAITING_EDITOR' // Looking for the Slate editor element in DOM
+  | 'INJECTING'       // Writing prompt text + clicking send button
+  | 'GENERATING'      // Waiting for AI render (MutationObserver watching tiles)
+  | 'DOWNLOADING'     // Images confirmed ready, triggering chrome.downloads
+  | 'RATE_LIMITED'    // 429 / "too quickly" — exponential backoff running
+  | 'PAUSED'          // User-initiated pause (state preserved)
+  | 'ERROR';          // Unrecoverable error on current scene
+
+/** Events that drive FSM transitions */
+export type BotEvent =
+  | 'START'
+  | 'EDITOR_FOUND'
+  | 'INJECTED'
+  | 'ALL_IMAGES_READY'
+  | 'DOWNLOAD_COMPLETE'
+  | 'RATE_LIMIT'
+  | 'COOLDOWN_DONE'
+  | 'PAUSE'
+  | 'RESUME'
+  | 'FATAL_ERROR'
+  | 'RESET';
+
+// ─── Queue ───────────────────────────────────────────────────────────────────
+
 export type PromptStatus =
   | 'PENDING'
   | 'IN_PROGRESS'
   | 'DOWNLOADED'
   | 'ERROR'
-  | 'RATE_LIMITED'
-  | 'RETRYING';
+  | 'RATE_LIMITED';
 
 export interface QueueItem {
   id: string;
@@ -17,6 +45,8 @@ export interface QueueItem {
   updatedAt: number;
 }
 
+// ─── Gallery ─────────────────────────────────────────────────────────────────
+
 export interface GeneratedImage {
   id: string;
   sceneNumber: number;
@@ -25,6 +55,36 @@ export interface GeneratedImage {
   filename: string;
   downloadedAt: number;
 }
+
+// ─── Log ─────────────────────────────────────────────────────────────────────
+
+export interface LogEntry {
+  id: string;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+  timestamp: number;
+}
+
+// ─── Extension State (persisted to chrome.storage.local after every mutation) ─
+
+export interface ExtensionState {
+  botState: BotState;
+  queue: QueueItem[];
+  gallery: GeneratedImage[];
+  logs: LogEntry[];
+  isRunning: boolean;
+  isPaused: boolean;
+  activeTabId: number | null;
+  activeSceneId: string | null; // ID of the currently IN_PROGRESS queue item
+  projectName: string;
+  apiSource: 'json' | 'local_api';
+  localApiUrl: string;
+  backoffAttempt: number;
+  nextRetryAt: number;
+  lastUpdated: number;
+}
+
+// ─── Script schema ───────────────────────────────────────────────────────────
 
 export interface ImagePrompt {
   subjects: { description: string; action: string }[];
@@ -37,44 +97,9 @@ export interface ImagePrompt {
 export interface ScriptScene {
   scene_number: number;
   image_prompt: ImagePrompt;
-  narration: string;
+  narration?: string;
 }
 
 export interface ScriptData {
   scenes: ScriptScene[];
 }
-
-export interface LogEntry {
-  id: string;
-  level: 'info' | 'warn' | 'error';
-  message: string;
-  timestamp: number;
-}
-
-export interface ExtensionState {
-  queue: QueueItem[];
-  gallery: GeneratedImage[];
-  logs: LogEntry[];
-  isRunning: boolean;
-  isPaused: boolean;
-  activeTabId: number | null;
-  apiSource: 'json' | 'local_api';
-  localApiUrl: string;
-  projectName: string;
-  backoffAttempt: number;
-  nextRetryAt: number;
-  lastUpdated: number;
-}
-
-export type MessageType =
-  | 'GET_STATE'
-  | 'START_QUEUE'
-  | 'PAUSE_QUEUE'
-  | 'RESUME_QUEUE'
-  | 'CLEAR_QUEUE'
-  | 'STATE_UPDATED'
-  | 'BATCH_DETECTED'
-  | 'IMAGE_TILE_APPEARED'
-  | 'RATE_LIMIT_DETECTED'
-  | 'CONNECT_LOCAL_API'
-  | 'DISCONNECT_LOCAL_API';

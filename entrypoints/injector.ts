@@ -12,6 +12,7 @@ export default defineContentScript({
     installFetchInterceptor();
     installXHRInterceptor();
     scheduleMutationObserver();
+    installCommandListener();
   },
 });
 
@@ -172,4 +173,88 @@ function installMutationObserver() {
   });
 
   console.log('[FLOW] MutationObserver active on document.body');
+}
+
+// ─── Command listener (receives FLOW_DO_INJECT from content script) ───────────
+
+function installCommandListener() {
+  window.addEventListener('message', ({ source, data }) => {
+    if (source !== window || data?.type !== 'FLOW_DO_INJECT') return;
+    const prompt = data.prompt as string;
+    if (!prompt) return;
+
+    doInject(prompt)
+      .then(() => window.postMessage({ type: 'FLOW_INJECT_DONE' }, '*'))
+      .catch((e) => console.error('[FLOW] Injection failed:', e));
+  });
+}
+
+async function doInject(promptText: string): Promise<void> {
+  const editor = document.querySelector<HTMLElement>('[data-slate-editor="true"]');
+  if (!editor) throw new Error('Slate editor not found');
+
+  editor.focus();
+
+  const leaf = editor.querySelector('[data-slate-leaf="true"]') ?? editor;
+  const sel  = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(leaf);
+  range.collapse(false);
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+
+  const beforeInput = new InputEvent('beforeinput', {
+    inputType: 'insertText', data: promptText, bubbles: true, cancelable: true,
+  }) as any;
+  beforeInput.getTargetRanges = () => [range];
+  editor.dispatchEvent(beforeInput);
+
+  if (!beforeInput.defaultPrevented) {
+    document.execCommand('insertText', false, promptText);
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  // Small wait for React state to settle before clicking send
+  await new Promise<void>((r) => setTimeout(r, 800));
+
+  const sendBtn = findSendButton();
+  if (sendBtn) {
+    sendBtn.removeAttribute('disabled');
+    sendBtn.removeAttribute('aria-disabled');
+    sendBtn.style.pointerEvents = 'auto';
+    sendBtn.click();
+
+    // Also fire via React's synthetic event handler
+    const rKey = Object.keys(sendBtn).find((k) => k.startsWith('__reactProps$'));
+    if (rKey) {
+      const rProps = (sendBtn as any)[rKey];
+      if (typeof rProps?.onClick === 'function') {
+        try { rProps.onClick({ preventDefault: () => {}, stopPropagation: () => {}, nativeEvent: { isTrusted: true } }); } catch {}
+      }
+    }
+  }
+
+  // Enter key via React's onKeyDown handler
+  editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+  const eKey = Object.keys(editor).find((k) => k.startsWith('__reactProps$'));
+  if (eKey) {
+    const eProps = (editor as any)[eKey];
+    if (typeof eProps?.onKeyDown === 'function') {
+      try { eProps.onKeyDown({ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, preventDefault: () => {}, stopPropagation: () => {}, nativeEvent: { isTrusted: true } }); } catch {}
+    }
+  }
+}
+
+function findSendButton(): HTMLElement | null {
+  // ARIA label first (most resilient)
+  const byAria = document.querySelector<HTMLElement>(
+    'button[aria-label*="send" i], button[aria-label*="generate" i], button[aria-label*="submit" i]',
+  );
+  if (byAria) return byAria;
+
+  // Fallback: icon text content
+  return Array.from(document.querySelectorAll<HTMLElement>('button')).find((b) => {
+    const icon = b.querySelector('i.google-symbols, [class*="icon"]');
+    return icon?.textContent?.trim() === 'arrow_forward';
+  }) ?? null;
 }
