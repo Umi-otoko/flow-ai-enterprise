@@ -18,10 +18,10 @@ export default defineContentScript({
     console.log('[FLOW CS] Content script active (isolated world)');
 
     // ── 1. Keepalive port — prevents Chrome from killing the SW ───────────────
-    maintainPort((msg: any) => {
+    maintainPort((msg) => {
       // Commands sent by SW via the port (faster than one-shot messages)
-      if (msg.type === 'INJECT_PROMPT') {
-        window.postMessage({ type: 'FLOW_DO_INJECT', prompt: msg.prompt }, '*');
+      if (msg['type'] === 'INJECT_PROMPT') {
+        window.postMessage({ type: 'FLOW_DO_INJECT', prompt: msg['prompt'] }, '*');
       }
     });
 

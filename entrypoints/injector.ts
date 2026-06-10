@@ -63,12 +63,17 @@ function installXHRInterceptor() {
   const _open = XMLHttpRequest.prototype.open;
   const _send = XMLHttpRequest.prototype.send;
 
-  XMLHttpRequest.prototype.open = function (method: string, url: string, ...rest: any[]) {
-    (this as any)._flowUrl = url;
-    return _open.apply(this, [method, url, ...rest] as any);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  XMLHttpRequest.prototype.open = function (...args: any[]) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (this as any)._flowUrl = args[1] as string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (_open as any).apply(this, args);
   };
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   XMLHttpRequest.prototype.send = function (...args: any[]) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if ((this as any)._flowUrl?.includes('batchGenerateImages')) {
       this.addEventListener('load', function (this: XMLHttpRequest) {
         try {
@@ -79,7 +84,8 @@ function installXHRInterceptor() {
         } catch {}
       });
     }
-    return _send.apply(this, args as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (_send as any).apply(this, args);
   };
 }
 
@@ -205,7 +211,7 @@ async function doInject(promptText: string): Promise<void> {
 
   const beforeInput = new InputEvent('beforeinput', {
     inputType: 'insertText', data: promptText, bubbles: true, cancelable: true,
-  }) as any;
+  }) as InputEvent & { getTargetRanges: () => Range[] };
   beforeInput.getTargetRanges = () => [range];
   editor.dispatchEvent(beforeInput);
 
@@ -227,7 +233,8 @@ async function doInject(promptText: string): Promise<void> {
     // Also fire via React's synthetic event handler
     const rKey = Object.keys(sendBtn).find((k) => k.startsWith('__reactProps$'));
     if (rKey) {
-      const rProps = (sendBtn as any)[rKey];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rProps = (sendBtn as Record<string, any>)[rKey] as { onClick?: (e: unknown) => void } | undefined;
       if (typeof rProps?.onClick === 'function') {
         try { rProps.onClick({ preventDefault: () => {}, stopPropagation: () => {}, nativeEvent: { isTrusted: true } }); } catch {}
       }
@@ -238,7 +245,8 @@ async function doInject(promptText: string): Promise<void> {
   editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
   const eKey = Object.keys(editor).find((k) => k.startsWith('__reactProps$'));
   if (eKey) {
-    const eProps = (editor as any)[eKey];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const eProps = (editor as Record<string, any>)[eKey] as { onKeyDown?: (e: unknown) => void } | undefined;
     if (typeof eProps?.onKeyDown === 'function') {
       try { eProps.onKeyDown({ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, preventDefault: () => {}, stopPropagation: () => {}, nativeEvent: { isTrusted: true } }); } catch {}
     }

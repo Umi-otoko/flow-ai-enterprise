@@ -15,12 +15,14 @@ export default function App() {
 
   // ── Sync state from background ──────────────────────────────────────────────
   useEffect(() => {
-    browser.runtime.sendMessage({ type: 'GET_STATE' }).then((res: any) => {
-      if (res?.state) setState(res.state);
+    browser.runtime.sendMessage({ type: 'GET_STATE' }).then((res: unknown) => {
+      if (res && typeof res === 'object' && 'state' in res) setState((res as { state: ExtensionState }).state);
     });
 
-    const listener = (msg: any) => {
-      if (msg.type === 'STATE_UPDATED') setState(msg.payload as ExtensionState);
+    const listener = (msg: unknown) => {
+      if (!msg || typeof msg !== 'object') return;
+      const m = msg as { type?: string; payload?: ExtensionState };
+      if (m.type === 'STATE_UPDATED' && m.payload) setState(m.payload);
     };
     browser.runtime.onMessage.addListener(listener);
     return () => browser.runtime.onMessage.removeListener(listener);
@@ -60,12 +62,19 @@ export default function App() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       // Background normalizes payload when START_QUEUE is called — pass raw
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const apiData = data as any;
       await browser.runtime.sendMessage({
         type: 'START_QUEUE',
-        payload: { prompts: data?.scenes ? data.scenes.map((s: any) => ({
-          scene_number: s.scene_number,
-          prompt: `Subjects: ${s.image_prompt?.subjects?.map((x: any) => `${x.description} ${x.action}`).join(', ')}. Environment: ${s.image_prompt?.environment}. Lighting: ${s.image_prompt?.lighting}. Composition: ${s.image_prompt?.composition}. Style: ${s.image_prompt?.style}`,
-        })) : data, tabId: tab.id },
+        payload: {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          prompts: apiData?.scenes ? apiData.scenes.map((s: any) => ({
+            scene_number: s.scene_number,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            prompt: `Subjects: ${s.image_prompt?.subjects?.map((x: any) => `${x.description} ${x.action}`).join(', ')}. Environment: ${s.image_prompt?.environment}. Lighting: ${s.image_prompt?.lighting}. Composition: ${s.image_prompt?.composition}. Style: ${s.image_prompt?.style}`,
+          })) : apiData,
+          tabId: tab.id,
+        },
       });
     } catch (e) {
       console.error('[API fetch]', e);

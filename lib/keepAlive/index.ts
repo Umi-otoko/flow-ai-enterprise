@@ -69,7 +69,7 @@ export class PortRegistry {
 
 /** Call once in the content script to maintain a persistent port to the SW. */
 export function maintainPort(
-  onMessage: (msg: any) => void,
+  onMessage: (msg: Record<string, unknown>) => void,
 ): void {
   let heartbeat: ReturnType<typeof setInterval> | null = null;
 

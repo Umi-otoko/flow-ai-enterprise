@@ -80,32 +80,32 @@ export default defineBackground(async () => {
     if (port.name !== PORT_NAME) return;
     ports.register(port);
 
-    port.onMessage.addListener((msg: any) => {
-      switch (msg.type) {
+    port.onMessage.addListener((msg: Record<string, unknown>) => {
+      switch (msg['type']) {
         case 'HEARTBEAT': break; // keeping SW alive via active port
-        case 'FSM_EVENT': applyEvent(msg.event as BotEvent, msg.payload); break;
+        case 'FSM_EVENT': applyEvent(msg['event'] as BotEvent, msg['payload']); break;
       }
     });
   });
 
   // 6 — Standard one-shot messages (from popup and content script)
-  browser.runtime.onMessage.addListener((msg: any, _sender, reply) => {
-    handleMessage(msg, reply);
+  browser.runtime.onMessage.addListener((msg, _sender, reply) => {
+    handleMessage(msg as Record<string, unknown>, reply as (r: unknown) => void);
     return true;
   });
 });
 
 // ─── Message router ───────────────────────────────────────────────────────────
 
-function handleMessage(msg: any, reply: (r: any) => void) {
-  switch (msg.type as string) {
+function handleMessage(msg: Record<string, unknown>, reply: (r: unknown) => void) {
+  switch (msg['type'] as string) {
 
     case 'GET_STATE':
       reply({ state });
       break;
 
     case 'START_QUEUE': {
-      const { prompts, tabId, projectName } = msg.payload;
+      const { prompts, tabId, projectName } = msg['payload'] as { prompts: { scene_number: number; prompt: string }[]; tabId: number; projectName?: string };
       state.activeTabId = tabId;
       state.isRunning   = true;
       state.isPaused    = false;
@@ -228,10 +228,14 @@ function tryProcessNext(): void {
 }
 
 // ─── Batch / media mapping ────────────────────────────────────────────────────
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- tRPC response shape is unknown at compile time
 
 function handleBatch(raw: unknown): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const data = unwrapTrpc(raw) as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const workflows: any[] = data?.workflows ?? [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mediaItems: any[] = data?.media ?? [];
 
   for (const wf of workflows) {
@@ -239,8 +243,10 @@ function handleBatch(raw: unknown): void {
     const batchId: string | undefined = wf?.metadata?.batchId;
     if (!batchId) continue;
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const batchMedia = mediaItems.filter(
-      (m) => m?.image?.generatedImage?.workflowId === wfId || m?.workflowId === wfId,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (m: any) => m?.image?.generatedImage?.workflowId === wfId || m?.workflowId === wfId,
     );
 
     const promptFromResponse: string | undefined =
@@ -257,6 +263,7 @@ function handleBatch(raw: unknown): void {
       (v) => v.sceneNumber === target.scene_number,
     ).length;
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     batchMedia.forEach((m: any, idx: number) => {
       const mediaId: string | undefined = m?.image?.generatedImage?.mediaId ?? m?.name;
       if (mediaId && !mediaMap.has(mediaId)) {
@@ -373,13 +380,17 @@ function handleRateLimit(): void {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function unwrapTrpc(raw: unknown): unknown {
   if (Array.isArray(raw)) {
     for (const item of raw) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const inner = (item as any)?.result?.data?.json ?? (item as any)?.result?.data;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       if ((inner as any)?.workflows || (inner as any)?.media) return inner;
     }
   }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const r = raw as any;
   if (r?.result?.data?.json?.workflows || r?.result?.data?.json?.media) return r.result.data.json;
   if (r?.result?.data?.workflows || r?.result?.data?.media) return r.result.data;
