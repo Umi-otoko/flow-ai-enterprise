@@ -3,10 +3,27 @@
   "compilerOptions": {
     "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
+
+    // ── Strict mode (non-negotiable) ─────────────────────────────────────────
     "strict": true,
-    "noUncheckedIndexedAccess": false,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // ── Additional safety nets ────────────────────────────────────────────────
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "forceConsistentCasingInFileNames": true,
+
     "paths": {
       "@/*": ["./*"]
     }
-  }
+  },
+  "exclude": [
+    "node_modules",
+    ".wxt",
+    ".output"
+  ]
 }

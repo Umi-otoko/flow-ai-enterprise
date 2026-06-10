@@ -3,3 +3,11 @@ node_modules/
 .wxt/
 *.zip
 .env
+.env.local
+
+# ESLint cache
+.eslintcache
+
+# OS
+.DS_Store
+Thumbs.db
