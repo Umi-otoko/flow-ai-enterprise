@@ -56,6 +56,7 @@ export default [
         FileReader: 'readonly',
         Request: 'readonly',
         Range: 'readonly',
+        URL: 'readonly',
         IDBDatabase: 'readonly',
         IDBOpenDBRequest: 'readonly',
         IDBRequest: 'readonly',

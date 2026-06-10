@@ -104,27 +104,8 @@ function handleMessage(msg: Record<string, unknown>, reply: (r: unknown) => void
       break;
 
     case 'START_QUEUE': {
-      const { prompts, tabId, projectName } = msg['payload'] as { prompts: { scene_number: number; prompt: string }[]; tabId: number; projectName?: string };
-      state.activeTabId = tabId;
-      state.isRunning   = true;
-      state.isPaused    = false;
-      if (projectName) state.projectName = projectName;
-
-      const newItems: QueueItem[] = prompts.map((p: { scene_number: number; prompt: string }) => ({
-        id:           crypto.randomUUID(),
-        scene_number: p.scene_number,
-        prompt:       p.prompt,
-        status:       'PENDING',
-        retryCount:   0,
-        createdAt:    Date.now(),
-        updatedAt:    Date.now(),
-      }));
-
-      state.queue = [...state.queue, ...newItems];
-      log('info', `Queue loaded: ${newItems.length} scene(s) added`);
-      persistAndBroadcast();
-      tryProcessNext();
-      reply({ success: true });
+      const payload = msg['payload'] as { prompts: { scene_number: number; prompt: string }[]; tabId: number; projectName?: string };
+      void startQueue(payload, reply);
       break;
     }
 
@@ -190,6 +171,59 @@ function applyEvent(event: BotEvent, _payload?: unknown): void {
 
 // ─── Queue orchestration ─────────────────────────────────────────────────────
 
+/** True if the URL is a page where our content script runs (Google Flow). */
+function isFlowTab(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const host = new URL(url).hostname;
+    return host === 'labs.google' || host === 'google.com' || host.endsWith('.google.com');
+  } catch {
+    return false;
+  }
+}
+
+async function startQueue(
+  payload: { prompts: { scene_number: number; prompt: string }[]; tabId: number; projectName?: string },
+  reply: (r: unknown) => void,
+): Promise<void> {
+  const { prompts, tabId, projectName } = payload;
+  state.activeTabId = tabId;
+  if (projectName) state.projectName = projectName;
+
+  const newItems: QueueItem[] = prompts.map((p) => ({
+    id:           crypto.randomUUID(),
+    scene_number: p.scene_number,
+    prompt:       p.prompt,
+    status:       'PENDING',
+    retryCount:   0,
+    createdAt:    Date.now(),
+    updatedAt:    Date.now(),
+  }));
+  state.queue = [...state.queue, ...newItems];
+  log('info', `Queue loaded: ${newItems.length} scene(s) added`);
+
+  // Guard: the active tab must be Google Flow, or there is no content script
+  // to talk to ("Receiving end does not exist").
+  let url: string | undefined;
+  try { url = (await chrome.tabs.get(tabId)).url; } catch { /* tab gone */ }
+
+  if (!isFlowTab(url)) {
+    state.isRunning = false;
+    state.isPaused  = false;
+    state.botState  = 'IDLE';
+    log('error', 'Open Google Flow (labs.google) in the active tab, then press Start.');
+    persistAndBroadcast();
+    reply({ success: false, error: 'not_on_flow' });
+    return;
+  }
+
+  state.isRunning = true;
+  state.isPaused  = false;
+  persistAndBroadcast();
+  tryProcessNext();
+  reply({ success: true });
+}
+
 function tryProcessNext(): void {
   if (!state.isRunning || state.isPaused) return;
   if (state.botState !== 'IDLE') return; // Already busy
@@ -210,19 +244,39 @@ function tryProcessNext(): void {
     sceneId: next.id,
   });
 
-  if (!sent) {
-    // Port not ready yet — try via tabs.sendMessage as fallback
-    chrome.tabs.sendMessage(state.activeTabId, {
-      type:   'INJECT_PROMPT',
-      prompt: next.prompt,
-      sceneId: next.id,
-    }).catch((e) => {
-      log('error', `Could not reach content script: ${e}`);
-      next.status = 'ERROR';
-      next.errorMessage = 'Content script unreachable';
-      state.activeSceneId = null;
-      applyEvent('FATAL_ERROR');
-    });
+  // Port not ready (SW just woke up, or content script not yet connected) —
+  // fall back to one-shot messaging, injecting the content script if needed.
+  if (!sent) void deliverInject(state.activeTabId, next);
+}
+
+/**
+ * Best-effort delivery of an INJECT_PROMPT command to a tab that has no open
+ * port. Tries tabs.sendMessage; if the content script isn't present (common
+ * when the Flow tab was already open before the extension loaded), injects it
+ * programmatically and retries once. On final failure, asks the user to reload.
+ */
+async function deliverInject(tabId: number, item: QueueItem): Promise<void> {
+  const command = { type: 'INJECT_PROMPT', prompt: item.prompt, sceneId: item.id };
+
+  try {
+    await chrome.tabs.sendMessage(tabId, command);
+    return;
+  } catch {
+    // Content script not registered on this tab yet — inject and retry.
+  }
+
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content-scripts/content.js'] });
+    await new Promise<void>((r) => setTimeout(r, 300));
+    await chrome.tabs.sendMessage(tabId, command);
+  } catch {
+    log('error', 'Flow tab not ready — reload the labs.google tab, then press Resume.');
+    item.status = 'PENDING';
+    item.updatedAt = Date.now();
+    state.activeSceneId = null;
+    state.isRunning = false;
+    state.botState  = 'IDLE';
+    persistAndBroadcast();
   }
 }
 
