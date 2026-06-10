@@ -21,6 +21,14 @@
       "@/*": ["./*"]
     }
   },
+  "include": [
+    ".wxt/**/*.d.ts",
+    "entrypoints/**/*",
+    "lib/**/*",
+    "utils/**/*",
+    "wxt.config.ts",
+    "tailwind.config.ts"
+  ],
   "exclude": [
     "node_modules",
     ".output"

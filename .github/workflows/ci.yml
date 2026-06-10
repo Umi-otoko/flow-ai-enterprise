@@ -27,8 +27,12 @@ jobs:
 
       - name: Install dependencies
         # npm install (not ci) — no package-lock.json in repo yet.
-        # postinstall script runs `wxt prepare`, generating .wxt/tsconfig.json
         run: npm install
+
+      - name: Prepare WXT types
+        # Generates .wxt/tsconfig.json and .wxt/types/imports.d.ts so that
+        # defineBackground / defineContentScript are visible to tsc.
+        run: npx wxt prepare
 
       - name: Type check
         run: npm run compile
